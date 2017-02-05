@@ -1,5 +1,4 @@
 import tensorflow as tf
-from tensorflow.python import control_flow_ops
 import input_data
 import math
 import os
@@ -121,7 +120,7 @@ def encoder(inputs, noise_std):
             return z
 
         # perform batch normalization according to value of boolean "training" placeholder:
-        z = control_flow_ops.cond(training, training_batch_norm, eval_batch_norm)
+        z = tf.cond(training, training_batch_norm, eval_batch_norm)
 
         if l == L:
             # use softmax activation in output layer
