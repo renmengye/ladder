@@ -32,9 +32,8 @@ def extract_images(filename):
   with gzip.open(filename) as bytestream:
     magic = _read32(bytestream)
     if magic != 2051:
-      raise ValueError(
-          'Invalid magic number %d in MNIST image file: %s' %
-          (magic, filename))
+      raise ValueError('Invalid magic number %d in MNIST image file: %s' %
+                       (magic, filename))
     num_images = _read32(bytestream)
     rows = _read32(bytestream)
     cols = _read32(bytestream)
@@ -59,9 +58,8 @@ def extract_labels(filename, one_hot=False):
   with gzip.open(filename) as bytestream:
     magic = _read32(bytestream)
     if magic != 2049:
-      raise ValueError(
-          'Invalid magic number %d in MNIST label file: %s' %
-          (magic, filename))
+      raise ValueError('Invalid magic number %d in MNIST label file: %s' %
+                       (magic, filename))
     num_items = _read32(bytestream)
     buf = bytestream.read(num_items)
     labels = numpy.frombuffer(buf, dtype=numpy.uint8)
@@ -77,8 +75,7 @@ class DataSet(object):
       self._num_examples = 10000
     else:
       assert images.shape[0] == labels.shape[0], (
-          "images.shape: %s labels.shape: %s" % (images.shape,
-                                                 labels.shape))
+          "images.shape: %s labels.shape: %s" % (images.shape, labels.shape))
       self._num_examples = images.shape[0]
 
       # Convert shape from [num examples, rows, columns, depth]
@@ -116,7 +113,8 @@ class DataSet(object):
       fake_image = [1.0 for _ in xrange(784)]
       fake_label = 0
       return [fake_image for _ in xrange(batch_size)], [
-          fake_label for _ in xrange(batch_size)]
+          fake_label for _ in xrange(batch_size)
+      ]
     start = self._index_in_epoch
     self._index_in_epoch += batch_size
     if self._index_in_epoch > self._num_examples:
@@ -134,43 +132,48 @@ class DataSet(object):
     end = self._index_in_epoch
     return self._images[start:end], self._labels[start:end]
 
+
 class SemiDataSet(object):
-    def __init__(self, images, labels, n_labeled):
-        self.n_labeled = n_labeled
 
-        # Unlabled DataSet
-        self.unlabeled_ds = DataSet(images, labels)
+  def __init__(self, images, labels, n_labeled):
+    self.n_labeled = n_labeled
 
-        # Labeled DataSet
-        self.num_examples = self.unlabeled_ds.num_examples
-        indices = numpy.arange(self.num_examples)
-        shuffled_indices = numpy.random.permutation(indices)
-        images = images[shuffled_indices]
-        labels = labels[shuffled_indices]
-        y = numpy.array([numpy.arange(10)[l==1][0] for l in labels])
-        idx = indices[y==0][:5]
-        n_classes = y.max() + 1
-        n_from_each_class = n_labeled / n_classes
-        i_labeled = []
-        for c in range(n_classes):
-            i = indices[y==c][:n_from_each_class]
-            i_labeled += list(i)
-        l_images = images[i_labeled]
-        l_labels = labels[i_labeled]
-        self.labeled_ds = DataSet(l_images, l_labels)
+    # Unlabled DataSet
+    self.unlabeled_ds = DataSet(images, labels)
 
-    def next_batch(self, batch_size):
-        unlabeled_images, _ = self.unlabeled_ds.next_batch(batch_size)
-        if batch_size > self.n_labeled:
-            labeled_images, labels = self.labeled_ds.next_batch(self.n_labeled)
-        else:
-            labeled_images, labels = self.labeled_ds.next_batch(batch_size)
-        images = numpy.vstack([labeled_images, unlabeled_images])
-        return images, labels
+    # Labeled DataSet
+    self.num_examples = self.unlabeled_ds.num_examples
+    indices = numpy.arange(self.num_examples)
+    shuffled_indices = numpy.random.permutation(indices)
+    images = images[shuffled_indices]
+    labels = labels[shuffled_indices]
+    y = numpy.array([numpy.arange(10)[l == 1][0] for l in labels])
+    idx = indices[y == 0][:5]
+    n_classes = y.max() + 1
+    n_from_each_class = n_labeled / n_classes
+    i_labeled = []
+    for c in range(n_classes):
+      i = indices[y == c][:n_from_each_class]
+      i_labeled += list(i)
+    l_images = images[i_labeled]
+    l_labels = labels[i_labeled]
+    self.labeled_ds = DataSet(l_images, l_labels)
 
-def read_data_sets(train_dir, n_labeled = 100, fake_data=False, one_hot=False):
+  def next_batch(self, batch_size):
+    unlabeled_images, _ = self.unlabeled_ds.next_batch(batch_size)
+    if batch_size > self.n_labeled:
+      labeled_images, labels = self.labeled_ds.next_batch(self.n_labeled)
+    else:
+      labeled_images, labels = self.labeled_ds.next_batch(batch_size)
+    images = numpy.vstack([labeled_images, unlabeled_images])
+    return images, labels
+
+
+def read_data_sets(train_dir, n_labeled=100, fake_data=False, one_hot=False):
+
   class DataSets(object):
     pass
+
   data_sets = DataSets()
 
   if fake_data:
