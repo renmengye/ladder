@@ -1,5 +1,6 @@
 """Functions for downloading and reading MNIST data."""
-from __future__ import print_function
+from __future__ import (absolute_import, division, print_function,
+                        unicode_literals)
 import gzip
 import os
 import urllib
@@ -23,7 +24,7 @@ def maybe_download(filename, work_directory):
 
 def _read32(bytestream):
   dt = numpy.dtype(numpy.uint32).newbyteorder('>')
-  return numpy.frombuffer(bytestream.read(4), dtype=dt)
+  return numpy.frombuffer(bytestream.read(4), dtype=dt)[0]
 
 
 def extract_images(filename):
@@ -150,7 +151,7 @@ class SemiDataSet(object):
     y = numpy.array([numpy.arange(10)[l == 1][0] for l in labels])
     idx = indices[y == 0][:5]
     n_classes = y.max() + 1
-    n_from_each_class = n_labeled / n_classes
+    n_from_each_class = int(n_labeled / n_classes)
     i_labeled = []
     for c in range(n_classes):
       i = indices[y == c][:n_from_each_class]
