@@ -35,12 +35,12 @@ def wi(shape, name):
 shapes = zip(layer_sizes[:-1], layer_sizes[1:])  # shapes of linear layers
 
 weights = {
-    'W': [wi(s, "W") for s in shapes],  # Encoder weights
-    'V': [wi(s[::-1], "V") for s in shapes],  # Decoder weights
+    "W": [wi(s, "W") for s in shapes],  # Encoder weights
+    "V": [wi(s[::-1], "V") for s in shapes],  # Decoder weights
     # batch normalization parameter to shift the normalized value
-    'beta': [bi(0.0, layer_sizes[l + 1], "beta") for l in range(L)],
+    "beta": [bi(0.0, layer_sizes[l + 1], "beta") for l in range(L)],
     # batch normalization parameter to scale the normalized value
-    'gamma': [bi(1.0, layer_sizes[l + 1], "beta") for l in range(L)]
+    "gamma": [bi(1.0, layer_sizes[l + 1], "beta") for l in range(L)]
 }
 
 noise_std = 0.3  # scaling factor for noise used in corrupted encoder
@@ -96,13 +96,13 @@ def encoder(inputs, noise_std):
   d = {
   }  # to store the pre-activation, activation, mean and variance for each layer
   # The data for labeled and unlabeled examples are stored separately
-  d['labeled'] = {'z': {}, 'm': {}, 'v': {}, 'h': {}}
-  d['unlabeled'] = {'z': {}, 'm': {}, 'v': {}, 'h': {}}
-  d['labeled']['z'][0], d['unlabeled']['z'][0] = split_lu(h)
+  d["labeled"] = {"z": {}, "m": {}, "v": {}, "h": {}}
+  d["unlabeled"] = {"z": {}, "m": {}, "v": {}, "h": {}}
+  d["labeled"]["z"][0], d["unlabeled"]["z"][0] = split_lu(h)
   for l in range(1, L + 1):
     print "Layer ", l, ": ", layer_sizes[l - 1], " -> ", layer_sizes[l]
-    d['labeled']['h'][l - 1], d['unlabeled']['h'][l - 1] = split_lu(h)
-    z_pre = tf.matmul(h, weights['W'][l - 1])  # pre-activation
+    d["labeled"]["h"][l - 1], d["unlabeled"]["h"][l - 1] = split_lu(h)
+    z_pre = tf.matmul(h, weights["W"][l - 1])  # pre-activation
     z_pre_l, z_pre_u = split_lu(z_pre)  # split labeled and unlabeled examples
 
     m, v = tf.nn.moments(z_pre_u, axes=[0])
@@ -119,7 +119,8 @@ def encoder(inputs, noise_std):
         z += tf.random_normal(tf.shape(z_pre)) * noise_std
       else:
         # Clean encoder
-        # batch normalization + update the average mean and variance using batch mean and variance of labeled examples
+        # batch normalization + update the average mean and variance using
+        # batch mean and variance of labeled examples
         z = join(
             update_batch_normalization(z_pre_l, l),
             batch_normalization(z_pre_u, m, v))
@@ -132,25 +133,28 @@ def encoder(inputs, noise_std):
       mean = ewma.average(running_mean[l - 1])
       var = ewma.average(running_var[l - 1])
       z = batch_normalization(z_pre, mean, var)
-      # Instead of the above statement, the use of the following 2 statements containing a typo
+      # Instead of the above statement, the use of the following 2 statements
+      # containing a typo
       # consistently produces a 0.2% higher accuracy for unclear reasons.
       # m_l, v_l = tf.nn.moments(z_pre_l, axes=[0])
-      # z = join(batch_normalization(z_pre_l, m_l, mean, var), batch_normalization(z_pre_u, mean, var))
+      # z = join(batch_normalization(z_pre_l, m_l, mean, var),
+      # batch_normalization(z_pre_u, mean, var))
       return z
 
-    # perform batch normalization according to value of boolean "training" placeholder:
+    # perform batch normalization according to value of boolean "training"
+    # placeholder:
     z = tf.cond(training, training_batch_norm, eval_batch_norm)
 
     if l == L:
       # use softmax activation in output layer
-      h = tf.nn.softmax(weights['gamma'][l - 1] * (z + weights["beta"][l - 1]))
+      h = tf.nn.softmax(weights["gamma"][l - 1] * (z + weights["beta"][l - 1]))
     else:
       # use ReLU activation in hidden layers
       h = tf.nn.relu(z + weights["beta"][l - 1])
-    d['labeled']['z'][l], d['unlabeled']['z'][l] = split_lu(z)
-    d['unlabeled']['m'][l], d['unlabeled']['v'][
-        l] = m, v  # save mean and variance of unlabeled examples for decoding
-  d['labeled']['h'][l], d['unlabeled']['h'][l] = split_lu(h)
+    d["labeled"]["z"][l], d["unlabeled"]["z"][l] = split_lu(z)
+    # save mean and variance of unlabeled examples for decoding
+    d["unlabeled"]["m"][l], d["unlabeled"]["v"][l] = m, v
+  d["labeled"]["h"][l], d["unlabeled"]["h"][l] = split_lu(h)
   return h, d
 
 
@@ -166,17 +170,17 @@ print "=== Decoder ==="
 def g_gauss(z_c, u, size):
   "gaussian denoising function proposed in the original paper"
   wi = lambda inits, name: tf.Variable(inits * tf.ones([size]), name=name)
-  a1 = wi(0., 'a1')
-  a2 = wi(1., 'a2')
-  a3 = wi(0., 'a3')
-  a4 = wi(0., 'a4')
-  a5 = wi(0., 'a5')
+  a1 = wi(0., "a1")
+  a2 = wi(1., "a2")
+  a3 = wi(0., "a3")
+  a4 = wi(0., "a4")
+  a5 = wi(0., "a5")
 
-  a6 = wi(0., 'a6')
-  a7 = wi(1., 'a7')
-  a8 = wi(0., 'a8')
-  a9 = wi(0., 'a9')
-  a10 = wi(0., 'a10')
+  a6 = wi(0., "a6")
+  a7 = wi(1., "a7")
+  a8 = wi(0., "a8")
+  a9 = wi(0., "a9")
+  a10 = wi(0., "a10")
 
   mu = a1 * tf.sigmoid(a2 * u + a3) + a4 * u + a5
   v = a6 * tf.sigmoid(a7 * u + a8) + a9 * u + a10
@@ -192,13 +196,13 @@ for l in range(L, -1, -1):
   print "Layer ", l, ": ", layer_sizes[l + 1] if l + 1 < len(
       layer_sizes) else None, " -> ", layer_sizes[
           l], ", denoising cost: ", denoising_cost[l]
-  z, z_c = clean['unlabeled']['z'][l], corr['unlabeled']['z'][l]
-  m, v = clean['unlabeled']['m'].get(l, 0), clean['unlabeled']['v'].get(
+  z, z_c = clean["unlabeled"]["z"][l], corr["unlabeled"]["z"][l]
+  m, v = clean["unlabeled"]["m"].get(l, 0), clean["unlabeled"]["v"].get(
       l, 1 - 1e-10)
   if l == L:
     u = unlabeled(y_c)
   else:
-    u = tf.matmul(z_est[l + 1], weights['V'][l])
+    u = tf.matmul(z_est[l + 1], weights["V"][l])
   u = batch_normalization(u)
   z_est[l] = g_gauss(z_c, u, layer_sizes[l])
   z_est_bn = (z_est[l] - m) / v
@@ -242,17 +246,17 @@ sess = tf.Session()
 i_iter = 0
 
 ckpt = tf.train.get_checkpoint_state(
-    'checkpoints/')  # get latest checkpoint (if any)
+    "checkpoints/")  # get latest checkpoint (if any)
 if ckpt and ckpt.model_checkpoint_path:
   # if checkpoint exists, restore the parameters and set epoch_n and i_iter
   saver.restore(sess, ckpt.model_checkpoint_path)
-  epoch_n = int(ckpt.model_checkpoint_path.split('-')[1])
+  epoch_n = int(ckpt.model_checkpoint_path.split("-")[1])
   i_iter = (epoch_n + 1) * (num_examples / batch_size)
   print "Restored Epoch ", epoch_n
 else:
   # no checkpoint exists. create checkpoints directory if it does not exist.
-  if not os.path.exists('checkpoints'):
-    os.makedirs('checkpoints')
+  if not os.path.exists("checkpoints"):
+    os.makedirs("checkpoints")
   init = tf.initialize_all_variables()
   sess.run(init)
 
@@ -274,14 +278,20 @@ for i in tqdm(range(i_iter, num_iter)):
     epoch_n = i / (num_examples / batch_size)
     if (epoch_n + 1) >= decay_after:
       # decay learning rate
-      # learning_rate = starter_learning_rate * ((num_epochs - epoch_n) / (num_epochs - decay_after))
-      ratio = 1.0 * (num_epochs - (epoch_n + 1)
-                    )  # epoch_n + 1 because learning rate is set for next epoch
+      # lr = starter_lr * ((num_epochs - epoch_n) / (num_epochs - decay_after))
+      # epoch_n + 1 because learning rate is set for next epoch
+      ratio = 1.0 * (num_epochs - (epoch_n + 1))
       ratio = max(0, ratio / (num_epochs - decay_after))
       sess.run(learning_rate.assign(starter_learning_rate * ratio))
-    saver.save(sess, 'checkpoints/model.ckpt', epoch_n)
-    # print "Epoch ", epoch_n, ", Accuracy: ", sess.run(accuracy, feed_dict={inputs: mnist.test.images, outputs:mnist.test.labels, training: False}), "%"
-    with open('train_log', 'ab') as train_log:
+    saver.save(sess, "checkpoints/model.ckpt", epoch_n)
+    test_acc = sess.run(accuracy,
+                        feed_dict={
+                            inputs: mnist.test.images,
+                            outputs: mnist.test.labels,
+                            training: False
+                        })
+    print "Epoch ", epoch_n, ", Accuracy: ", test_acc, "%"
+    with open("train_log", "ab") as train_log:
       # write test accuracy to file "train_log"
       train_log_w = csv.writer(train_log)
       log_i = [epoch_n] + sess.run([accuracy],
@@ -292,11 +302,11 @@ for i in tqdm(range(i_iter, num_iter)):
                                    })
       train_log_w.writerow(log_i)
 
-print "Final Accuracy: ", sess.run(accuracy,
-                                   feed_dict={
-                                       inputs: mnist.test.images,
-                                       outputs: mnist.test.labels,
-                                       training: False
-                                   }), "%"
-
+test_acc = sess.run(accuracy,
+                    feed_dict={
+                        inputs: mnist.test.images,
+                        outputs: mnist.test.labels,
+                        training: False
+                    })
+print "Final Accuracy: ", test_acc, "%"
 sess.close()
