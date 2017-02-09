@@ -4,23 +4,54 @@ backward.
 """
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
+
+import logger
+import numpy as np
 import tensorflow as tf
 
+from collections import namedtuple
 
-def bi(inits, size, name, dtype=tf.float32):
+log = logger.get()
+
+
+def bi(name, shape, inits=0.0, dtype=tf.float32):
   """Declares a bias variable with random normal initialization."""
   return tf.get_variable(
       name, shape, dtype=dtype, initializer=tf.constant_initializer(inits))
 
 
-def wi(shape, name, dtype=tf.float32):
+def wi(name, shape, dtype=tf.float32):
   """Declares a weight variable with random normal initialization."""
   return tf.get_variable(
       name,
-      shape,
+      # shape,
       dtype=dtype,
       initializer=tf.truncated_normal(
-          shape, mean=0.0, stddev=1 / np.sqrt(shape[0])))
+          shape, mean=0.0, stddev=1 / np.sqrt(np.prod(shape[:-1]))))
+
+
+def gauss_denoise(z_corrupt, u, size):
+  """Gaussian denoising function proposed in the original paper.
+
+  Args:
+  """
+  a1 = bi("a1", [size], 0.)
+  a2 = bi("a2", [size], 1.)
+  a3 = bi("a3", [size], 0.)
+  a4 = bi("a4", [size], 0.)
+  a5 = bi("a5", [size], 0.)
+
+  a6 = bi("a6", [size], 0.)
+  a7 = bi("a7", [size], 1.)
+  a8 = bi("a8", [size], 0.)
+  a9 = bi("a9", [size], 0.)
+  a10 = bi("a10", [size], 0.)
+
+  mu = a1 * tf.sigmoid(a2 * u + a3) + a4 * u + a5
+  v = a6 * tf.sigmoid(a7 * u + a8) + a9 * u + a10
+
+  z_recon = (z_corrupt - mu) * v + mu
+  return z_recon
 
 
 def batch_norm(x,
@@ -31,7 +62,9 @@ def batch_norm(x,
                eps=1e-3,
                scope="bn",
                name="bn_out",
-               return_mean=False):
+               mean=None,
+               var=None,
+               decay=0.9):
   """Applies batch normalization.
     Collect mean and variances on x except the last dimension. And apply
     normalization as below:
@@ -44,134 +77,235 @@ def batch_norm(x,
       beta: Bias parameter.
       axes: Axes to collect statistics.
       eps: Denominator bias.
-      return_mean: Whether to also return the computed mean.
+      mean: Manually calculated mean and var.
 
     Returns:
       normed: Batch-normalized variable.
       mean: Mean used for normalization (optional).
   """
   with tf.variable_scope(scope):
-    n_out = tf.shape(x)[-1]
+    n_out = x.get_shape()[-1]
     emean = tf.get_variable("ema_mean", [n_out], trainable=False)
     evar = tf.get_variable("ema_var", [n_out], trainable=False)
     if is_training:
-      batch_mean, batch_var = tf.nn.moments(x, axes, name="moments")
-      batch_mean.set_shape([n_out])
-      batch_var.set_shape([n_out])
-      ema = tf.train.ExponentialMovingAverage(decay=0.9)
-      ema_apply_op_local = ema.apply([batch_mean, batch_var])
-      with tf.control_dependencies([ema_apply_op_local]):
-        mean, var = tf.identity(batch_mean), tf.identity(batch_var)
-      emean_val = ema.average(batch_mean)
-      evar_val = ema.average(batch_var)
-      with tf.control_dependencies(
-          [tf.assign(emean, emean_val), tf.assign(evar, evar_val)]):
+      if mean is None or var is None:
+        mean, var = tf.nn.moments(x, axes, name="moments")
+      # batch_mean.set_shape([n_out])
+      # batch_var.set_shape([n_out])
+      ema_mean_op = tf.assign(emean, emean * decay + mean * (1 - decay))
+      ema_var_op = tf.assign(evar, evar * decay + var * (1 - decay))
+      with tf.control_dependencies([ema_mean_op, ema_var_op]):
         normed = tf.nn.batch_normalization(
             x, mean, var, beta, gamma, eps, name=name)
     else:
+      if mean is None or var is None:
+        mean, var = emean, evar
       normed = tf.nn.batch_normalization(
-          x, emean, evar, beta, gamma, eps, name=name)
-  if return_mean:
-    if is_training:
-      return normed, mean
-    else:
-      return normed, emean
-  else:
-    return normed
+          x, mean, var, beta, gamma, eps, name=name)
+  return normed
 
 
 class LadderModel(object):
   """Ladder network object."""
 
-  def __init__(self, config):
+  def __init__(self, config, is_training=True):
+    """Initializes model, assuming architecture is feed-forward, layer-wise."""
     self._dtype = tf.float32
+    self._config = config
+    self._is_training = is_training
+
+    inputs = tf.placeholder(tf.float32, shape=(None, config.layer_sizes[0]))
+    labels = tf.placeholder(tf.float32)
+    self._inputs = inputs
+    self._labels = labels
+    with tf.name_scope("clean"):
+      with tf.variable_scope("encoder"):
+        _, act_clean, moments_clean = self.encoder(inputs, 0.0)
+
+    with tf.name_scope("corrupt"):
+      with tf.variable_scope("encoder", reuse=True):
+        y_corrupt, act_corrupt, _ = self.encoder(inputs, self.config.noise_std)
+
+    with tf.variable_scope("decoder"):
+      recon_cost = self.decoder(y_corrupt, act_corrupt, act_clean,
+                                moments_clean)
     pass
+
+  @property
+  def config(self):
+    return self._config
+
+  @property
+  def is_training(self):
+    return self._is_training
+
+  @property
+  def inputs(self):
+    return self._inputs
+
+  @property
+  def labels(self):
+    return self._labels
 
   @property
   def dtype(self):
     """Type of the floating precision."""
     return self._dtype
 
+  def slice_unlabeled(self, x):
+    batch_size = self.config.batch_size
+    return tf.slice(x, [batch_size, 0], [-1, -1])
+
+  def slice_labeled(self, x):
+    batch_size = self.config.batch_size
+    return tf.slice(x, [0, 0], [batch_size, -1])
+
+  def split_lu(self, x):
+    """Splits labeled and unlabeled data."""
+    # In the original implementation it assumes that the first "batch_size"
+    # examples are labeled and the rest is unlabeled. This assumption is a
+    # little weird, and the model needs to know batch size ahead of time.
+    batch_size = self.config.batch_size
+    labeled = self.slice_labeled(x)
+    unlabeled = self.slice_unlabeled(x)
+    return labeled, unlabeled
+
+  def add_noise(self, x, noise_std):
+    """Adds Gaussian noise to activation.
+
+    Args:
+      x: clean activation.
+      noise_std: Gaussian noise standard deviation.
+
+    Returns:
+      x_corrupt: Corrupted activation.
+    """
+    return x + tf.random_normal(tf.shape(x)) * noise_std
+
   def encoder(self, inputs, noise_std):
-    """Build encoder part.
+    """Builds encoder part.
 
     Args:
       inputs: Inputs to the encoder.
       noise_std: Standard deviation of the additive Gaussian noise.
 
     Returns:
-
+      output:
+      act:
+      moments:
     """
-    join = lambda l, u: tf.concat(0, [l, u])
-    labeled = lambda x: tf.slice(x, [0, 0], [batch_size, -1]) if x is not None else x
-    unlabeled = lambda x: tf.slice(x, [batch_size, 0], [-1, -1]) if x is not None else x
-    split_lu = lambda x: (labeled(x), unlabeled(x))
+    # Add noise to input
+    h = self.add_noise(inputs, noise_std)
 
-    h = inputs + tf.random_normal(tf.shape(
-        inputs)) * noise_std  # add noise to input
-    # To store the pre-activation, activation, mean and variance for each layer
-    d = {}
-    # The data for labeled and unlabeled examples are stored separately
-    d["labeled"] = {"z": {}, "m": {}, "v": {}, "h": {}}
-    d["unlabeled"] = {"z": {}, "m": {}, "v": {}, "h": {}}
-    d["labeled"]["z"][0], d["unlabeled"]["z"][0] = split_lu(h)
-    for l in range(1, L + 1):
-      print "Layer ", l, ": ", layer_sizes[l - 1], " -> ", layer_sizes[l]
-      d["labeled"]["h"][l - 1], d["unlabeled"]["h"][l - 1] = split_lu(h)
-      z_pre = tf.matmul(h, weights["W"][l - 1])  # pre-activation
-      z_pre_l, z_pre_u = split_lu(z_pre)  # split labeled and unlabeled examples
+    # Store intermediate activations.
+    act = {}
+    act["labeled"] = {}
+    act["unlabeled"] = {}
+    moments = {"mean": {}, "var": {}}
+    act["labeled"][0], act["unlabeled"][0] = self.split_lu(h)
+    L = len(self.config.layer_sizes) - 1
 
-      m, v = tf.nn.moments(z_pre_u, axes=[0])
+    for ll in range(1, L + 1):
+      with tf.variable_scope("layer_{}".format(ll)):
+        log.info("Layer {}: {} -> {}".format(ll, self.config.layer_sizes[
+            ll - 1], self.config.layer_sizes[ll]))
 
-      def training_batch_norm():
-        # Training batch normalization
-        # batch normalization for labeled and unlabeled examples is performed
-        # separately
-        if noise_std > 0:
-          # Corrupted encoder
-          # batch normalization + noise
-          z = join(
-              batch_normalization(z_pre_l), batch_normalization(z_pre_u, m, v))
-          z += tf.random_normal(tf.shape(z_pre)) * noise_std
+        # Recognition weights.
+        w_shape = [self.config.layer_sizes[ll - 1], self.config.layer_sizes[ll]]
+        w = wi("w", w_shape, dtype=self.dtype)
+
+        # Pre-activation
+        z_pre = tf.matmul(h, w)
+
+        # Split labeled and unlabeled examples.
+        z_pre_l, z_pre_u = self.split_lu(z_pre)
+
+        # Calculate batch statistics for unlabeled examples.
+        # Change "axes" to [0, 1, 2] for conv nets.
+        mean, var = tf.nn.moments(z_pre_u, axes=[0], name="moments")
+
+        # In the original implementation, there is no gamma in BN until
+        # the very last layer. In any case, affine transformation is
+        # performed after noise injection.
+        z_l_bn = batch_norm(
+            z_pre_l, axes=[0], is_training=self.is_training, scope="bn_labeled")
+        z_u_bn = batch_norm(
+            z_pre_u,
+            axes=[0],
+            is_training=self.is_training,
+            scope="bn_unlabeled",
+            mean=mean,
+            var=var)
+        z = tf.concat(0, [z_l_bn, z_u_bn])
+
+        # Add random Gaussian noise.
+        z = self.add_noise(z, noise_std)
+
+        beta = bi("beta", [self.config.layer_sizes[ll]], 0.0, dtype=self.dtype)
+        if ll == L:
+          # Use softmax activation in output layer.
+          gamma = bi("gamma", [self.config.layer_sizes[ll]],
+                     1.0,
+                     dtype=self.dtype)
+          h = tf.nn.softmax(gamma * (z + beta))
         else:
-          # Clean encoder
-          # batch normalization + update the average mean and variance using
-          # batch mean and variance of labeled examples
-          z = join(
-              update_batch_normalization(z_pre_l, l),
-              batch_normalization(z_pre_u, m, v))
-        return z
+          # Use ReLU activation in hidden layers.
+          h = tf.nn.relu(z + beta)
 
-      def eval_batch_norm():
-        # Evaluation batch normalization
-        # obtain average mean and variance and use it to normalize the batch
-        mean = ewma.average(running_mean[l - 1])
-        var = ewma.average(running_var[l - 1])
-        z = batch_normalization(z_pre, mean, var)
-        # Instead of the above statement, the use of the following 2 statements
-        # containing a typo
-        # consistently produces a 0.2% higher accuracy for unclear reasons.
-        # m_l, v_l = tf.nn.moments(z_pre_l, axes=[0])
-        # z = join(batch_normalization(z_pre_l, m_l, mean, var),
-        # batch_normalization(z_pre_u, mean, var))
-        return z
+        # Save intermediate activation for reconstruction.
+        act["labeled"][ll], act["unlabeled"][ll] = self.split_lu(z)
+        # save mean and variance of unlabeled examples for decoding
+        moments["mean"][ll] = mean
+        moments["var"][ll] = var
+    return h, act, moments
 
-      # perform batch normalization according to value of boolean "training"
-      # placeholder:
-      z = tf.cond(training, training_batch_norm, eval_batch_norm)
+  def decoder(self, y_corrupt, act_corrupt, act_clean, moments_clean):
+    """Builds decoder part.
 
-      if l == L:
-        # use softmax activation in output layer
-        h = tf.nn.softmax(weights["gamma"][l - 1] *
-                          (z + weights["beta"][l - 1]))
-      else:
-        # use ReLU activation in hidden layers
-        h = tf.nn.relu(z + weights["beta"][l - 1])
-      d["labeled"]["z"][l], d["unlabeled"]["z"][l] = split_lu(z)
-      # save mean and variance of unlabeled examples for decoding
-      d["unlabeled"]["m"][l], d["unlabeled"]["v"][l] = m, v
-    d["labeled"]["h"][l], d["unlabeled"]["h"][l] = split_lu(h)
-    return h, d
+    Args:
+      y_corrupt: The activation of last layer through the corrupt path.
+      act_corrupt: Intermediate layer activations (before non-linearity).
 
-  def decoder(self):
-    pass
+    Returns:
+    """
+    # To store the denoising cost of all layers
+    recon_cost = []
+    L = len(self.config.layer_sizes) - 1
+    for ll in range(L, -1, -1):
+      with tf.variable_scope("layer_{}".format(ll)):
+        log.info("Layer {}: {} -> {}, denoising cost: {}".format(
+            ll, self.config.layer_sizes[ll + 1] if ll < L else None,
+            self.config.layer_sizes[ll], self.config.denoising_cost[ll]))
+
+        z_clean = act_clean["unlabeled"][ll]
+        z_corrupt = act_corrupt["unlabeled"][ll]
+        mean = moments_clean["mean"].get(ll, 0.0)
+        var = moments_clean["var"].get(ll, 1 - 1e-10)
+        if ll == L:
+          u = self.slice_unlabeled(y_corrupt)
+        else:
+          v_shape = [
+              self.config.layer_sizes[ll + 1], self.config.layer_sizes[ll]
+          ]
+          print(v_shape)
+          v = wi("v", v_shape, dtype=self.dtype)
+          u = tf.matmul(z_recon, v)
+        u = batch_norm(u, is_training=self.is_training, axes=[0], scope="bn_u")
+        z_recon = gauss_denoise(z_corrupt, u, self.config.layer_sizes[ll])
+        z_recon_bn = (z_recon - mean) / var
+        _cost = tf.reduce_mean(tf.square(z_recon_bn - z_clean))
+        _cost *= self.config.denoising_cost[ll]
+        recon_cost.append(_cost)
+    return recon_cost
+
+
+Config = namedtuple(
+    "Config", ["layer_sizes", "batch_size", "denoising_cost", "noise_std"])
+
+if __name__ == "__main__":
+  LadderModel(
+      Config(
+          layer_sizes=[784, 1000, 500, 250, 250, 250, 10],
+          batch_size=100,
+          denoising_cost=[1000.0, 10.0, 0.10, 0.10, 0.10, 0.10, 0.10],
+          noise_std=0.3))
