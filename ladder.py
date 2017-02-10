@@ -220,7 +220,10 @@ loss = cost + u_cost
 # cost used for prediction
 pred_cost = -tf.reduce_mean(tf.reduce_sum(outputs * tf.log(y), 1))
 # no of correct predictions
+# y = tf.Print(y, [0.0, tf.shape(y)])
 correct_prediction = tf.equal(tf.argmax(y, 1), tf.argmax(outputs, 1))
+# correct_prediction = tf.Print(correct_prediction,
+#                               [1.0, tf.shape(correct_prediction)])
 accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float")) * tf.constant(
     100.0)
 

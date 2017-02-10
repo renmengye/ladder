@@ -114,13 +114,15 @@ class LadderModel(object):
     self._config = config
     self._is_training = is_training
 
-    inputs = tf.placeholder(tf.float32, shape=(None, config.layer_sizes[0]))
-    labels = tf.placeholder(tf.float32)
+    inputs = tf.placeholder(
+        tf.float32, shape=[None, config.layer_sizes[0]], name="inputs")
+    labels = tf.placeholder(tf.int64, shape=[None], name="labels")
     self._inputs = inputs
     self._labels = labels
+    
     with tf.name_scope("clean"):
       with tf.variable_scope("encoder"):
-        _, act_clean, moments_clean = self.encoder(inputs, 0.0)
+        y_clean, act_clean, moments_clean = self.encoder(inputs, 0.0)
 
     with tf.name_scope("corrupt"):
       with tf.variable_scope("encoder", reuse=True):
@@ -129,6 +131,27 @@ class LadderModel(object):
     with tf.variable_scope("decoder"):
       recon_cost = self.decoder(y_corrupt, act_corrupt, act_clean,
                                 moments_clean)
+
+    correct = tf.equal(tf.argmax(y_clean, 1), labels)
+    acc = tf.reduce_mean(tf.cast(correct, "float")) * 100.0
+    self._acc = acc
+
+    if is_training:
+      train_cost = tf.reduce_mean(
+          tf.nn.sparse_softmax_cross_entropy_with_logits(
+              self.slice_labeled(y_corrupt), labels))
+      train_cost += tf.add_n(recon_cost)
+      pred_cost = tf.reduce_mean(
+          tf.nn.sparse_softmax_cross_entropy_with_logits(
+              self.slice_labeled(y_clean), labels))
+      lr = tf.Variable(0.0, trainable=False)
+      train_step = tf.train.AdamOptimizer(lr).minimize(train_cost)
+      new_lr = tf.placeholder(self.dtype, None)
+      assign_lr = tf.assign(lr, new_lr)
+      self._lr = lr
+      self._new_lr = new_lr
+      self._assign_lr = assign_lr
+      self._train_op = train_step
     pass
 
   @property
@@ -152,6 +175,18 @@ class LadderModel(object):
     """Type of the floating precision."""
     return self._dtype
 
+  @property
+  def lr(self):
+    return self._lr
+
+  @property
+  def train_op(self):
+    return self._train_op
+
+  @property
+  def acc(self):
+    return self._acc
+
   def slice_unlabeled(self, x):
     batch_size = self.config.batch_size
     return tf.slice(x, [batch_size, 0], [-1, -1])
@@ -162,9 +197,6 @@ class LadderModel(object):
 
   def split_lu(self, x):
     """Splits labeled and unlabeled data."""
-    # In the original implementation it assumes that the first "batch_size"
-    # examples are labeled and the rest is unlabeled. This assumption is a
-    # little weird, and the model needs to know batch size ahead of time.
     batch_size = self.config.batch_size
     labeled = self.slice_labeled(x)
     unlabeled = self.slice_unlabeled(x)
@@ -247,7 +279,9 @@ class LadderModel(object):
           gamma = bi("gamma", [self.config.layer_sizes[ll]],
                      1.0,
                      dtype=self.dtype)
-          h = tf.nn.softmax(gamma * (z + beta))
+
+          # Just compute the logits here.
+          h = gamma * (z + beta)
         else:
           # Use ReLU activation in hidden layers.
           h = tf.nn.relu(z + beta)
@@ -298,13 +332,17 @@ class LadderModel(object):
         recon_cost.append(_cost)
     return recon_cost
 
+  def assign_lr(self, sess, new_lr):
+    sess.run(self._assign_lr, feed_dict={self._new_lr: new_lr})
 
-Config = namedtuple(
-    "Config", ["layer_sizes", "batch_size", "denoising_cost", "noise_std"])
+
+LadderConfig = namedtuple(
+    "LadderConfig",
+    ["layer_sizes", "batch_size", "denoising_cost", "noise_std"])
 
 if __name__ == "__main__":
   LadderModel(
-      Config(
+      LadderConfig(
           layer_sizes=[784, 1000, 500, 250, 250, 250, 10],
           batch_size=100,
           denoising_cost=[1000.0, 10.0, 0.10, 0.10, 0.10, 0.10, 0.10],

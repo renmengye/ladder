@@ -136,7 +136,7 @@ class DataSet(object):
 
 class SemiDataSet(object):
 
-  def __init__(self, images, labels, n_labeled):
+  def __init__(self, images, labels, n_labeled, one_hot=False):
     self.n_labeled = n_labeled
 
     # Unlabled DataSet
@@ -148,7 +148,10 @@ class SemiDataSet(object):
     shuffled_indices = numpy.random.permutation(indices)
     images = images[shuffled_indices]
     labels = labels[shuffled_indices]
-    y = numpy.array([numpy.arange(10)[l == 1][0] for l in labels])
+    if one_hot:
+      y = numpy.array([numpy.arange(10)[l == 1][0] for l in labels])
+    else:
+      y = labels
     idx = indices[y == 0][:5]
     n_classes = y.max() + 1
     n_from_each_class = int(n_labeled / n_classes)
@@ -206,7 +209,8 @@ def read_data_sets(train_dir, n_labeled=100, fake_data=False, one_hot=False):
   train_images = train_images[VALIDATION_SIZE:]
   train_labels = train_labels[VALIDATION_SIZE:]
 
-  data_sets.train = SemiDataSet(train_images, train_labels, n_labeled)
+  data_sets.train = SemiDataSet(
+      train_images, train_labels, n_labeled, one_hot=one_hot)
   data_sets.validation = DataSet(validation_images, validation_labels)
   data_sets.test = DataSet(test_images, test_labels)
 
