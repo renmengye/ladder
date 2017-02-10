@@ -14,10 +14,10 @@ from collections import namedtuple
 log = logger.get()
 
 
-def bi(name, shape, inits=0.0, dtype=tf.float32):
-  """Declares a bias variable with random normal initialization."""
+def bi(name, shape, value=0.0, dtype=tf.float32):
+  """Declares a bias variable with constant initialization."""
   return tf.get_variable(
-      name, shape, dtype=dtype, initializer=tf.constant_initializer(inits))
+      name, shape, dtype=dtype, initializer=tf.constant_initializer(value))
 
 
 def wi(name, shape, dtype=tf.float32):
@@ -30,11 +30,14 @@ def wi(name, shape, dtype=tf.float32):
           shape, mean=0.0, stddev=1 / np.sqrt(np.prod(shape[:-1]))))
 
 
-def gauss_denoise(z_corrupt, u, size):
+def gauss_denoise(z_corrupt, u):
   """Gaussian denoising function proposed in the original paper.
 
   Args:
+    z_corrupt: Corrupted current layer activations.
+    u: Top down activations.
   """
+  size = z_corrupt.get_shape()[-1]
   a1 = bi("a1", [size], 0.)
   a2 = bi("a2", [size], 1.)
   a3 = bi("a3", [size], 0.)
@@ -90,8 +93,6 @@ def batch_norm(x,
     if is_training:
       if mean is None or var is None:
         mean, var = tf.nn.moments(x, axes, name="moments")
-      # batch_mean.set_shape([n_out])
-      # batch_var.set_shape([n_out])
       ema_mean_op = tf.assign(emean, emean * decay + mean * (1 - decay))
       ema_var_op = tf.assign(evar, evar * decay + var * (1 - decay))
       with tf.control_dependencies([ema_mean_op, ema_var_op]):
@@ -109,7 +110,13 @@ class LadderModel(object):
   """Ladder network object."""
 
   def __init__(self, config, is_training=True):
-    """Initializes model, assuming architecture is feed-forward, layer-wise."""
+    """Initializes the model, assuming the architecture is feed-forward, 
+    layer-wise.
+
+    Args:
+      config: LadderConfig object.
+      is_training: Whether the model is in training mode.
+    """
     self._dtype = tf.float32
     self._config = config
     self._is_training = is_training
@@ -119,7 +126,8 @@ class LadderModel(object):
     labels = tf.placeholder(tf.int64, shape=[None], name="labels")
     self._inputs = inputs
     self._labels = labels
-    
+    self._num_labeled = tf.shape(labels)[0]
+
     with tf.name_scope("clean"):
       with tf.variable_scope("encoder"):
         y_clean, act_clean, moments_clean = self.encoder(inputs, 0.0)
@@ -156,18 +164,22 @@ class LadderModel(object):
 
   @property
   def config(self):
+    """Model configuration."""
     return self._config
 
   @property
   def is_training(self):
+    """Whether the model is in training mode."""
     return self._is_training
 
   @property
   def inputs(self):
+    """Inputs."""
     return self._inputs
 
   @property
   def labels(self):
+    """Labels."""
     return self._labels
 
   @property
@@ -177,27 +189,35 @@ class LadderModel(object):
 
   @property
   def lr(self):
+    """Learning rate."""
     return self._lr
 
   @property
   def train_op(self):
+    """One train step."""
     return self._train_op
 
   @property
   def acc(self):
+    """Classification accuracy."""
     return self._acc
 
   def slice_unlabeled(self, x):
-    batch_size = self.config.batch_size
-    return tf.slice(x, [batch_size, 0], [-1, -1])
+    """Split unlabeled portion from the combined."""
+    x_dim = x.get_shape()[-1]
+    x2 = tf.slice(x, [self._num_labeled, 0], [-1, -1])
+    x2.set_shape([None, x_dim])
+    return x2
 
   def slice_labeled(self, x):
-    batch_size = self.config.batch_size
-    return tf.slice(x, [0, 0], [batch_size, -1])
+    """Split labeled portion from the combined."""
+    x_dim = x.get_shape()[-1]
+    x2 = tf.slice(x, [0, 0], [self._num_labeled, -1])
+    x2.set_shape([None, x_dim])
+    return x2
 
   def split_lu(self, x):
     """Splits labeled and unlabeled data."""
-    batch_size = self.config.batch_size
     labeled = self.slice_labeled(x)
     unlabeled = self.slice_unlabeled(x)
     return labeled, unlabeled
@@ -279,7 +299,6 @@ class LadderModel(object):
           gamma = bi("gamma", [self.config.layer_sizes[ll]],
                      1.0,
                      dtype=self.dtype)
-
           # Just compute the logits here.
           h = gamma * (z + beta)
         else:
@@ -325,7 +344,7 @@ class LadderModel(object):
           v = wi("v", v_shape, dtype=self.dtype)
           u = tf.matmul(z_recon, v)
         u = batch_norm(u, is_training=self.is_training, axes=[0], scope="bn_u")
-        z_recon = gauss_denoise(z_corrupt, u, self.config.layer_sizes[ll])
+        z_recon = gauss_denoise(z_corrupt, u)
         z_recon_bn = (z_recon - mean) / var
         _cost = tf.reduce_mean(tf.square(z_recon_bn - z_clean))
         _cost *= self.config.denoising_cost[ll]
@@ -333,17 +352,44 @@ class LadderModel(object):
     return recon_cost
 
   def assign_lr(self, sess, new_lr):
+    """Assigns a new learning rate.
+
+    Args:
+      sess: TensorFlow session object.
+      new_lr: New learning rate value.
+    """
     sess.run(self._assign_lr, feed_dict={self._new_lr: new_lr})
+
+  def get_compatible_map(self):
+    """Get a mapping from old names to variables."""
+    raise Exception("Not implemented.")
+    results = {}
+    L = len(self.config.layer_sizes) - 1
+    with tf.variable_scope("encoder", reuse=True):
+      for ll in range(1, L + 1):
+        with tf.variable_scope("layer_{}".format(ll)):
+          w = wi("w", w_shape, dtype=self.dtype)
+          if ll > 1:
+            results["w_{}".format(ll)] = w
+          else:
+            results["w"] = w
+    with tf.variable_scope("decoder", reuse=True):
+      for ll in range(1, L + 1):
+        with tf.variable_scope("layer_{}".format(ll)):
+          w = wi("v", w_shape, dtype=self.dtype)
+          if ll > 1:
+            results["v_{}".format(ll)] = v
+          else:
+            results["v"] = v
 
 
 LadderConfig = namedtuple(
     "LadderConfig",
-    ["layer_sizes", "batch_size", "denoising_cost", "noise_std"])
+    ["layer_sizes", "denoising_cost", "noise_std"])
 
 if __name__ == "__main__":
   LadderModel(
       LadderConfig(
           layer_sizes=[784, 1000, 500, 250, 250, 250, 10],
-          batch_size=100,
           denoising_cost=[1000.0, 10.0, 0.10, 0.10, 0.10, 0.10, 0.10],
           noise_std=0.3))

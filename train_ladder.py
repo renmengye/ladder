@@ -14,6 +14,7 @@ log = logger.get()
 
 
 def test(sess, model, images, labels):
+  """Runs test accuracy."""
   test_acc = sess.run(model.acc,
                       feed_dict={model.inputs: images,
                                  model.labels: labels})
@@ -21,16 +22,19 @@ def test(sess, model, images, labels):
 
 
 def main():
+  """Trains a ladder network."""
   num_examples = 60000
   num_epochs = 150
   num_labeled = 100
   starter_lr = 0.02
+  layer_sizes = [784, 1000, 500, 250, 250, 250, 10]
+  batch_size = 100
+  denoising_cost = [1000.0, 10.0, 0.10, 0.10, 0.10, 0.10, 0.10]
+  noise_std = 0.3
   config = LadderConfig(
-      layer_sizes=[784, 1000, 500, 250, 250, 250, 10],
-      batch_size=100,
-      denoising_cost=[1000.0, 10.0, 0.10, 0.10, 0.10, 0.10, 0.10],
-      noise_std=0.3)
-  batch_size = config.batch_size
+      layer_sizes=layer_sizes,
+      denoising_cost=denoising_cost,
+      noise_std=noise_std)
   decay_after = 15
   num_iter = int((num_examples / batch_size) * num_epochs)
 
@@ -45,10 +49,10 @@ def main():
 
   num_test_examples = 10000
   config = LadderConfig(
-      layer_sizes=[784, 1000, 500, 250, 250, 250, 10],
+      layer_sizes=layer_sizes,
       batch_size=num_test_examples,
-      denoising_cost=[1000.0, 10.0, 0.10, 0.10, 0.10, 0.10, 0.10],
-      noise_std=0.3)
+      denoising_cost=denoising_cost,
+      noise_std=noise_std)
   with tf.name_scope("Valid"):
     with tf.variable_scope("Model", reuse=True):
       mvalid = LadderModel(copy(config), is_training=False)
@@ -71,7 +75,7 @@ def main():
       if not os.path.exists("checkpoints"):
         os.makedirs("checkpoints")
       sess.run(tf.global_variables_initializer())
-
+      [print(vv.name) for vv in tf.all_variables()]
     log.info("=== Training ===")
     test_acc = test(sess, mvalid, mnist.test.images, mnist.test.labels)
     log.info("Initial Accuracy: {:.2f}%".format(test_acc))
@@ -83,8 +87,6 @@ def main():
         epoch_n = int(i / (num_examples / batch_size))
         if (epoch_n + 1) >= decay_after:
           # decay learning rate
-          # lr = starter_lr * ((num_epochs - epoch_n) / (num_epochs - decay_after))
-          # epoch_n + 1 because learning rate is set for next epoch
           ratio = 1.0 * (num_epochs - (epoch_n + 1))
           ratio = max(0, ratio / (num_epochs - decay_after))
           m.assign_lr(sess, starter_lr * ratio)

@@ -33,7 +33,7 @@ def bi(inits, size, name):
 
 
 def wi(shape, name):
-  return tf.Variable(tf.random_normal(shape, name=name)) / math.sqrt(shape[0])
+  return tf.Variable(tf.random_normal(shape), name=name) / math.sqrt(shape[0])
 
 
 # shapes of linear layers
@@ -41,13 +41,13 @@ shapes = list(zip(layer_sizes[:-1], layer_sizes[1:]))
 
 weights = {
     # Encoder weights
-    "W": [wi(s, "W") for s in shapes],
+    "W": [wi(ss, "W") for ss in shapes],
     # Decoder weights
-    "V": [wi(s[::-1], "V") for s in shapes],
+    "V": [wi(ss[::-1], "V") for ss in shapes],
     # batch normalization parameter to shift the normalized value
-    "beta": [bi(0.0, layer_sizes[l + 1], "beta") for l in range(L)],
+    "beta": [bi(0.0, layer_sizes[ll + 1], "beta") for ll in range(L)],
     # batch normalization parameter to scale the normalized value
-    "gamma": [bi(1.0, layer_sizes[l + 1], "beta") for l in range(L)]
+    "gamma": [bi(1.0, layer_sizes[ll + 1], "gamma") for ll in range(L)]
 }
 
 # scaling factor for noise used in corrupted encoder
@@ -77,12 +77,14 @@ def batch_normalization(batch, mean=None, var=None):
 running_mean = [
     tf.Variable(
         tf.constant(
-            0.0, shape=[l]), trainable=False) for l in layer_sizes[1:]
+            0.0, shape=[ll]), trainable=False, name="running_mean")
+    for ll in layer_sizes[1:]
 ]
 running_var = [
     tf.Variable(
         tf.constant(
-            1.0, shape=[l]), trainable=False) for l in layer_sizes[1:]
+            1.0, shape=[ll]), trainable=False, name="running_var")
+    for ll in layer_sizes[1:]
 ]
 
 
@@ -227,7 +229,8 @@ correct_prediction = tf.equal(tf.argmax(y, 1), tf.argmax(outputs, 1))
 accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float")) * tf.constant(
     100.0)
 
-learning_rate = tf.Variable(starter_learning_rate, trainable=False)
+learning_rate = tf.Variable(
+    starter_learning_rate, trainable=False, name="learning_rate")
 train_step = tf.train.AdamOptimizer(learning_rate).minimize(loss)
 
 # add the updates of batch normalization statistics to train_step
@@ -258,6 +261,8 @@ else:
   if not os.path.exists("checkpoints"):
     os.makedirs("checkpoints")
   sess.run(tf.global_variables_initializer())
+
+[print(vv.name) for vv in tf.all_variables()]
 
 log.info("=== Training ===")
 test_acc = sess.run(accuracy,
