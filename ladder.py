@@ -2,6 +2,7 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 import csv
 import math
+import numpy as np
 import os
 import tensorflow as tf
 
@@ -49,6 +50,7 @@ weights = {
     # batch normalization parameter to scale the normalized value
     "gamma": [bi(1.0, layer_sizes[ll + 1], "gamma") for ll in range(L)]
 }
+[print(vv.get_shape()) for vv in weights["V"]]
 
 # scaling factor for noise used in corrupted encoder
 noise_std = 0.3
@@ -101,6 +103,7 @@ def update_batch_normalization(batch, l):
 def encoder(inputs, noise_std):
   # add noise to input
   h = inputs + tf.random_normal(tf.shape(inputs)) * noise_std
+  h = tf.Print(h, [-1.0, tf.reduce_mean(h)])
   # To store the pre-activation, activation, mean and variance for each layer
   d = {}
   # The data for labeled and unlabeled examples are stored separately
@@ -112,6 +115,7 @@ def encoder(inputs, noise_std):
     d["labeled"]["h"][l - 1], d["unlabeled"]["h"][l - 1] = split_lu(h)
     z_pre = tf.matmul(h, weights["W"][l - 1])  # pre-activation
     z_pre_l, z_pre_u = split_lu(z_pre)  # split labeled and unlabeled examples
+    z_pre_l = tf.Print(z_pre_l, [4.0, tf.reduce_mean(z_pre_l)])
 
     m, v = tf.nn.moments(z_pre_u, axes=[0])
 
@@ -137,14 +141,21 @@ def encoder(inputs, noise_std):
     def eval_batch_norm():
       # Evaluation batch normalization
       # obtain average mean and variance and use it to normalize the batch
-      mean = ewma.average(running_mean[l - 1])
-      var = ewma.average(running_var[l - 1])
+      # print(running_mean[l - 1])
+      # mean = ewma.average(running_mean[l - 1])
+      # var = ewma.average(running_var[l - 1])
+      # print(mean)
+      mean = running_mean[l - 1]
+      var = running_var[l - 1]
+      print(mean)
+      print(var)
       z = batch_normalization(z_pre, mean, var)
       return z
 
     # perform batch normalization according to value of boolean "training"
     # placeholder:
     z = tf.cond(training, training_batch_norm, eval_batch_norm)
+    z = tf.Print(z, [2.0, tf.reduce_mean(z)])
 
     if l == L:
       # use softmax activation in output layer
@@ -245,68 +256,74 @@ mnist = input_data.read_data_sets(
 saver = tf.train.Saver()
 
 log.info("===  Starting Session ===")
-sess = tf.Session()
+with tf.Session() as sess:
+  i_iter = 0
+  # get latest checkpoint (if any)
+  ckpt = tf.train.get_checkpoint_state("checkpoints_old/")
+  if ckpt and ckpt.model_checkpoint_path:
+    # if checkpoint exists, restore the parameters and set epoch_n and i_iter
+    saver.restore(sess, ckpt.model_checkpoint_path)
+    epoch_n = int(ckpt.model_checkpoint_path.split("-")[1])
+    i_iter = int((epoch_n + 1) * (num_examples / batch_size))
+    log.info("Restored Epoch ", epoch_n)
+  else:
+    # no checkpoint exists. create checkpoints directory if it does not exist.
+    if not os.path.exists("checkpoints"):
+      os.makedirs("checkpoints")
+    sess.run(tf.global_variables_initializer())
 
-i_iter = 0
-# get latest checkpoint (if any)
-ckpt = tf.train.get_checkpoint_state("checkpoints/")
-if ckpt and ckpt.model_checkpoint_path:
-  # if checkpoint exists, restore the parameters and set epoch_n and i_iter
-  saver.restore(sess, ckpt.model_checkpoint_path)
-  epoch_n = int(ckpt.model_checkpoint_path.split("-")[1])
-  i_iter = int((epoch_n + 1) * (num_examples / batch_size))
-  log.info("Restored Epoch ", epoch_n)
-else:
-  # no checkpoint exists. create checkpoints directory if it does not exist.
-  if not os.path.exists("checkpoints"):
-    os.makedirs("checkpoints")
-  sess.run(tf.global_variables_initializer())
+  # [print(vv.name) for vv in tf.all_variables()]
+  wws = {}
+  for ll in range(6):
+    print(ll)
+    print(weights["W"][ll].eval().mean())
+    print(weights["W"][ll].eval().ravel()[:4])
+    print(weights["beta"][ll].eval().mean())
+    wws[str(ll)] = weights["W"][ll].eval()
+  np.savez("weights.npz", **wws)
 
-[print(vv.name) for vv in tf.all_variables()]
+  log.info("=== Training ===")
+  test_acc = sess.run(accuracy,
+                      feed_dict={
+                          inputs: mnist.test.images,
+                          outputs: mnist.test.labels,
+                          training: False
+                      })
+  log.info("Initial Accuracy: {:.2f}%".format(test_acc))
 
-log.info("=== Training ===")
-test_acc = sess.run(accuracy,
-                    feed_dict={
-                        inputs: mnist.test.images,
-                        outputs: mnist.test.labels,
-                        training: False
-                    })
-log.info("Initial Accuracy: {:.2f}%".format(test_acc))
+  for i in tqdm(range(i_iter, num_iter)):
+    images, labels = mnist.train.next_batch(batch_size)
+    sess.run(train_step,
+             feed_dict={inputs: images,
+                        outputs: labels,
+                        training: True})
+    if (i > 1) and ((i + 1) % (num_iter / num_epochs) == 0):
+      epoch_n = int(i / (num_examples / batch_size))
+      if (epoch_n + 1) >= decay_after:
+        # decay learning rate
+        # lr = starter_lr * ((num_epochs - epoch_n) / (num_epochs - decay_after))
+        # epoch_n + 1 because learning rate is set for next epoch
+        ratio = 1.0 * (num_epochs - (epoch_n + 1))
+        ratio = max(0, ratio / (num_epochs - decay_after))
+        sess.run(learning_rate.assign(starter_learning_rate * ratio))
+      saver.save(sess, "checkpoints/model.ckpt", epoch_n)
+      test_acc = sess.run(accuracy,
+                          feed_dict={
+                              inputs: mnist.test.images,
+                              outputs: mnist.test.labels,
+                              training: False
+                          })
+      log.info("Epoch {}, Accuracy: {:.2f}%".format(epoch_n, test_acc))
+      with open("train_log", "a") as train_log:
+        # write test accuracy to file "train_log"
+        train_log_w = csv.writer(train_log)
+        log_i = [epoch_n, test_acc]
+        train_log_w.writerow(log_i)
 
-for i in tqdm(range(i_iter, num_iter)):
-  images, labels = mnist.train.next_batch(batch_size)
-  sess.run(train_step,
-           feed_dict={inputs: images,
-                      outputs: labels,
-                      training: True})
-  if (i > 1) and ((i + 1) % (num_iter / num_epochs) == 0):
-    epoch_n = int(i / (num_examples / batch_size))
-    if (epoch_n + 1) >= decay_after:
-      # decay learning rate
-      # lr = starter_lr * ((num_epochs - epoch_n) / (num_epochs - decay_after))
-      # epoch_n + 1 because learning rate is set for next epoch
-      ratio = 1.0 * (num_epochs - (epoch_n + 1))
-      ratio = max(0, ratio / (num_epochs - decay_after))
-      sess.run(learning_rate.assign(starter_learning_rate * ratio))
-    saver.save(sess, "checkpoints/model.ckpt", epoch_n)
-    test_acc = sess.run(accuracy,
-                        feed_dict={
-                            inputs: mnist.test.images,
-                            outputs: mnist.test.labels,
-                            training: False
-                        })
-    log.info("Epoch {}, Accuracy: {:.2f}%".format(epoch_n, test_acc))
-    with open("train_log", "a") as train_log:
-      # write test accuracy to file "train_log"
-      train_log_w = csv.writer(train_log)
-      log_i = [epoch_n, test_acc]
-      train_log_w.writerow(log_i)
-
-test_acc = sess.run(accuracy,
-                    feed_dict={
-                        inputs: mnist.test.images,
-                        outputs: mnist.test.labels,
-                        training: False
-                    })
-log.info("Final Accuracy: {:.2f}%".format(test_acc))
-sess.close()
+  test_acc = sess.run(accuracy,
+                      feed_dict={
+                          inputs: mnist.test.images,
+                          outputs: mnist.test.labels,
+                          training: False
+                      })
+  log.info("Final Accuracy: {:.2f}%".format(test_acc))

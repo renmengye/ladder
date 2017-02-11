@@ -6,7 +6,6 @@ import logger
 import os
 import tensorflow as tf
 
-from copy import copy
 from ladder_model import LadderModel, LadderConfig
 from tqdm import tqdm
 
@@ -45,17 +44,12 @@ def main():
   log.info("=== Build Model ===")
   with tf.name_scope("Train"):
     with tf.variable_scope("Model", reuse=None):
-      m = LadderModel(copy(config), is_training=True)
+      m = LadderModel(config, is_training=True)
 
   num_test_examples = 10000
-  config = LadderConfig(
-      layer_sizes=layer_sizes,
-      batch_size=num_test_examples,
-      denoising_cost=denoising_cost,
-      noise_std=noise_std)
   with tf.name_scope("Valid"):
     with tf.variable_scope("Model", reuse=True):
-      mvalid = LadderModel(copy(config), is_training=False)
+      mvalid = LadderModel(config, is_training=False)
 
   saver = tf.train.Saver()
 
@@ -63,7 +57,7 @@ def main():
   with tf.Session() as sess:
     i_iter = 0
     # get latest checkpoint (if any)
-    ckpt = tf.train.get_checkpoint_state("checkpoints/")
+    ckpt = tf.train.get_checkpoint_state("_checkpoints/")
     if ckpt and ckpt.model_checkpoint_path:
       # if checkpoint exists, restore the parameters and set epoch_n and i_iter
       saver.restore(sess, ckpt.model_checkpoint_path)

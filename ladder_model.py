@@ -99,8 +99,11 @@ def batch_norm(x,
         normed = tf.nn.batch_normalization(
             x, mean, var, beta, gamma, eps, name=name)
     else:
+      # log.fatal(mean)
       if mean is None or var is None:
-        mean, var = emean, evar
+        # mean, var = emean, evar
+        mean = emean
+        var = evar
       normed = tf.nn.batch_normalization(
           x, mean, var, beta, gamma, eps, name=name)
   return normed
@@ -132,17 +135,20 @@ class LadderModel(object):
       with tf.variable_scope("encoder"):
         y_clean, act_clean, moments_clean = self.encoder(inputs, 0.0)
 
-    with tf.name_scope("corrupt"):
-      with tf.variable_scope("encoder", reuse=True):
-        y_corrupt, act_corrupt, _ = self.encoder(inputs, self.config.noise_std)
+    if is_training:
+      with tf.name_scope("corrupt"):
+        with tf.variable_scope("encoder", reuse=True):
+          y_corrupt, act_corrupt, _ = self.encoder(inputs,
+                                                   self.config.noise_std)
 
-    with tf.variable_scope("decoder"):
-      recon_cost = self.decoder(y_corrupt, act_corrupt, act_clean,
-                                moments_clean)
+      with tf.variable_scope("decoder"):
+        recon_cost = self.decoder(y_corrupt, act_corrupt, act_clean,
+                                  moments_clean)
 
     correct = tf.equal(tf.argmax(y_clean, 1), labels)
     acc = tf.reduce_mean(tf.cast(correct, "float")) * 100.0
     self._acc = acc
+    self._outputs = tf.nn.softmax(y_clean)
 
     if is_training:
       train_cost = tf.reduce_mean(
@@ -181,6 +187,11 @@ class LadderModel(object):
   def labels(self):
     """Labels."""
     return self._labels
+
+  @property
+  def outputs(self):
+    """Outputs."""
+    return self._outputs
 
   @property
   def dtype(self):
@@ -248,6 +259,7 @@ class LadderModel(object):
     """
     # Add noise to input
     h = self.add_noise(inputs, noise_std)
+    h = tf.Print(h, [-1.0, tf.reduce_mean(h)])
 
     # Store intermediate activations.
     act = {}
@@ -269,6 +281,8 @@ class LadderModel(object):
         # Pre-activation
         z_pre = tf.matmul(h, w)
 
+        z_pre = tf.Print(z_pre, [-0.5, tf.reduce_mean(z_pre)])
+
         # Split labeled and unlabeled examples.
         z_pre_l, z_pre_u = self.split_lu(z_pre)
 
@@ -279,8 +293,10 @@ class LadderModel(object):
         # In the original implementation, there is no gamma in BN until
         # the very last layer. In any case, affine transformation is
         # performed after noise injection.
+        z_pre_l = tf.Print(z_pre_l, [4.0, tf.reduce_mean(z_pre_l)])
         z_l_bn = batch_norm(
             z_pre_l, axes=[0], is_training=self.is_training, scope="bn_labeled")
+        z_l_bn = tf.Print(z_l_bn, [3.0, tf.reduce_mean(z_l_bn)])
         z_u_bn = batch_norm(
             z_pre_u,
             axes=[0],
@@ -289,9 +305,11 @@ class LadderModel(object):
             mean=mean,
             var=var)
         z = tf.concat(0, [z_l_bn, z_u_bn])
+        z = tf.Print(z, [2.0, tf.reduce_mean(z)])
 
         # Add random Gaussian noise.
         z = self.add_noise(z, noise_std)
+        tf.Print(z, [1.0, tf.reduce_mean(z)])
 
         beta = bi("beta", [self.config.layer_sizes[ll]], 0.0, dtype=self.dtype)
         if ll == L:
@@ -304,6 +322,7 @@ class LadderModel(object):
         else:
           # Use ReLU activation in hidden layers.
           h = tf.nn.relu(z + beta)
+        h = tf.Print(h, [0.0, tf.reduce_mean(h)])
 
         # Save intermediate activation for reconstruction.
         act["labeled"][ll], act["unlabeled"][ll] = self.split_lu(z)
@@ -340,7 +359,6 @@ class LadderModel(object):
           v_shape = [
               self.config.layer_sizes[ll + 1], self.config.layer_sizes[ll]
           ]
-          print(v_shape)
           v = wi("v", v_shape, dtype=self.dtype)
           u = tf.matmul(z_recon, v)
         u = batch_norm(u, is_training=self.is_training, axes=[0], scope="bn_u")
@@ -360,32 +378,66 @@ class LadderModel(object):
     """
     sess.run(self._assign_lr, feed_dict={self._new_lr: new_lr})
 
-  def get_compatible_map(self):
+  def get_variable_map(self):
     """Get a mapping from old names to variables."""
-    raise Exception("Not implemented.")
     results = {}
     L = len(self.config.layer_sizes) - 1
     with tf.variable_scope("encoder", reuse=True):
       for ll in range(1, L + 1):
         with tf.variable_scope("layer_{}".format(ll)):
-          w = wi("w", w_shape, dtype=self.dtype)
+          w = tf.get_variable("w")
           if ll > 1:
-            results["w_{}".format(ll)] = w
+            results["W_{}".format(ll - 1)] = w
+            results["beta_{}".format(ll - 1)] = tf.get_variable("beta")
           else:
-            results["w"] = w
-    with tf.variable_scope("decoder", reuse=True):
-      for ll in range(1, L + 1):
-        with tf.variable_scope("layer_{}".format(ll)):
-          w = wi("v", w_shape, dtype=self.dtype)
-          if ll > 1:
-            results["v_{}".format(ll)] = v
-          else:
-            results["v"] = v
+            results["W"] = w
+            results["beta"] = tf.get_variable("beta")
+          if ll == L:
+            results["gamma_{}".format(ll - 1)] = tf.get_variable("gamma")
+          with tf.variable_scope("bn_labeled"):
+            # if ll > 1:
+            #   results["cond_{}/running_mean_{}/ExponentialMovingAverage".format(
+            #       ll + 5, ll - 1)] = tf.get_variable("ema_mean")
+            #   results["cond_{}/running_var_{}/ExponentialMovingAverage".format(
+            #       ll + 5, ll - 1)] = tf.get_variable("ema_var")
+            # else:
+            #   results[
+            #       "cond_6/running_mean/ExponentialMovingAverage"] = tf.get_variable(
+            #           "ema_mean")
+            #   results[
+            #       "cond_6/running_var/ExponentialMovingAverage"] = tf.get_variable(
+            #           "ema_var")
+            if ll > 1:
+              results["running_mean_{}".format(ll - 1)] = tf.get_variable(
+                  "ema_mean")
+              results["running_var_{}".format(ll - 1)] = tf.get_variable(
+                  "ema_var")
+            else:
+              results["running_mean"] = tf.get_variable("ema_mean")
+              results["running_var"] = tf.get_variable("ema_var")
+
+    if self.is_training:
+      with tf.variable_scope("decoder", reuse=True):
+        for ll in range(L, -1, -1):
+          with tf.variable_scope("layer_{}".format(ll)):
+            # There is no V's in the last layer.
+            if ll < L:
+              if ll > 0:
+                results["V_{}".format(ll)] = tf.get_variable("v")
+              else:
+                results["V"] = tf.get_variable("v")
+              v = tf.get_variable("v")
+            for ii in range(1, 10):
+              ax = tf.get_variable("a{}".format(ii))
+              if ll == L:
+                results["a{}".format(ii)] = ax
+              else:
+                results["a{}_{}".format(ii, L - ll)] = ax
+    return results
 
 
-LadderConfig = namedtuple(
-    "LadderConfig",
-    ["layer_sizes", "denoising_cost", "noise_std"])
+LadderConfig = namedtuple("LadderConfig",
+                          ["layer_sizes", "denoising_cost", "noise_std"])
 
 if __name__ == "__main__":
   LadderModel(
