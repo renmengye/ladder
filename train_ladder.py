@@ -57,7 +57,7 @@ def main():
   with tf.Session() as sess:
     i_iter = 0
     # get latest checkpoint (if any)
-    ckpt = tf.train.get_checkpoint_state("_checkpoints/")
+    ckpt = tf.train.get_checkpoint_state("checkpoints_new/")
     if ckpt and ckpt.model_checkpoint_path:
       # if checkpoint exists, restore the parameters and set epoch_n and i_iter
       saver.restore(sess, ckpt.model_checkpoint_path)
@@ -66,8 +66,8 @@ def main():
       log.info("Restored Epoch ", epoch_n)
     else:
       # no checkpoint exists. create checkpoints directory if it does not exist.
-      if not os.path.exists("checkpoints"):
-        os.makedirs("checkpoints")
+      if not os.path.exists("checkpoints_new"):
+        os.makedirs("checkpoints_new")
       sess.run(tf.global_variables_initializer())
       [print(vv.name) for vv in tf.all_variables()]
     log.info("=== Training ===")
@@ -84,7 +84,7 @@ def main():
           ratio = 1.0 * (num_epochs - (epoch_n + 1))
           ratio = max(0, ratio / (num_epochs - decay_after))
           m.assign_lr(sess, starter_lr * ratio)
-        saver.save(sess, "checkpoints/model.ckpt", epoch_n)
+        saver.save(sess, "checkpoints_new/model.ckpt", epoch_n)
         test_acc = test(sess, mvalid, mnist.test.images, mnist.test.labels)
         log.info("Epoch {}, Accuracy: {:.2f}%".format(epoch_n, test_acc))
         # with open("train_log", "a") as train_log:
