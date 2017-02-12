@@ -13,8 +13,6 @@ import tensorflow as tf
 from train_ladder import test
 from ladder_model import LadderModel, LadderConfig
 
-OLD_CKPT = "checkpoints_old"
-NEW_CKPT = "checkpoints_new"
 log = logger.get()
 
 
