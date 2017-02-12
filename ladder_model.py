@@ -17,20 +17,24 @@ log = logger.get()
 def bi(name, shape, value=0.0, dtype=tf.float32):
   """Declares a bias variable with constant initialization."""
   return tf.get_variable(
-      name, shape, dtype=dtype, initializer=tf.constant_initializer(value))
+      name=name,
+      shape=shape,
+      dtype=dtype,
+      initializer=tf.constant_initializer(
+          value, dtype=dtype))
 
 
 def wi(name, shape, dtype=tf.float32):
   """Declares a weight variable with random normal initialization."""
   return tf.get_variable(
-      name,
-      # shape,
+      name=name,
+      shape=shape,
       dtype=dtype,
-      initializer=tf.truncated_normal(
-          shape, mean=0.0, stddev=1 / np.sqrt(np.prod(shape[:-1]))))
+      initializer=tf.truncated_normal_initializer(
+          mean=0.0, stddev=1 / np.sqrt(np.prod(shape[:-1])), dtype=dtype))
 
 
-def gauss_denoise(z_corrupt, u):
+def gauss_denoise(z_corrupt, u, dtype):
   """Gaussian denoising function proposed in the original paper.
 
   Args:
@@ -38,17 +42,17 @@ def gauss_denoise(z_corrupt, u):
     u: Top down activations.
   """
   size = z_corrupt.get_shape()[-1]
-  a1 = bi("a1", [size], 0.)
-  a2 = bi("a2", [size], 1.)
-  a3 = bi("a3", [size], 0.)
-  a4 = bi("a4", [size], 0.)
-  a5 = bi("a5", [size], 0.)
+  a1 = bi("a1", [size], value=0., dtype=dtype)
+  a2 = bi("a2", [size], value=1., dtype=dtype)
+  a3 = bi("a3", [size], value=0., dtype=dtype)
+  a4 = bi("a4", [size], value=0., dtype=dtype)
+  a5 = bi("a5", [size], value=0., dtype=dtype)
 
-  a6 = bi("a6", [size], 0.)
-  a7 = bi("a7", [size], 1.)
-  a8 = bi("a8", [size], 0.)
-  a9 = bi("a9", [size], 0.)
-  a10 = bi("a10", [size], 0.)
+  a6 = bi("a6", [size], value=0., dtype=dtype)
+  a7 = bi("a7", [size], value=1., dtype=dtype)
+  a8 = bi("a8", [size], value=0., dtype=dtype)
+  a9 = bi("a9", [size], value=0., dtype=dtype)
+  a10 = bi("a10", [size], value=0., dtype=dtype)
 
   mu = a1 * tf.sigmoid(a2 * u + a3) + a4 * u + a5
   v = a6 * tf.sigmoid(a7 * u + a8) + a9 * u + a10
@@ -57,17 +61,21 @@ def gauss_denoise(z_corrupt, u):
   return z_recon
 
 
+# TODO: set eps and decay as model hyperparameters.
 def batch_norm(x,
                is_training,
                gamma=None,
                beta=None,
                axes=[0, 1, 2],
-               eps=1e-3,
+               keep_average=True,
+               eps=1e-10,
                scope="bn",
                name="bn_out",
                mean=None,
                var=None,
-               decay=0.9):
+               decay=0.99,
+               debug=False,
+               dtype=tf.float32):
   """Applies batch normalization.
     Collect mean and variances on x except the last dimension. And apply
     normalization as below:
@@ -88,22 +96,47 @@ def batch_norm(x,
   """
   with tf.variable_scope(scope):
     n_out = x.get_shape()[-1]
-    emean = tf.get_variable("ema_mean", [n_out], trainable=False)
-    evar = tf.get_variable("ema_var", [n_out], trainable=False)
+    if keep_average:
+      emean = tf.get_variable(
+          "ema_mean",
+          shape=[n_out],
+          trainable=False,
+          dtype=dtype,
+          initializer=tf.constant_initializer(
+              0.0, dtype=dtype))
+      evar = tf.get_variable(
+          "ema_var",
+          shape=[n_out],
+          trainable=False,
+          dtype=dtype,
+          initializer=tf.constant_initializer(
+              1.0, dtype=dtype))
     if is_training:
       if mean is None or var is None:
         mean, var = tf.nn.moments(x, axes, name="moments")
-      ema_mean_op = tf.assign(emean, emean * decay + mean * (1 - decay))
-      ema_var_op = tf.assign(evar, evar * decay + var * (1 - decay))
-      with tf.control_dependencies([ema_mean_op, ema_var_op]):
+
+      if debug:
+        mean = tf.Print(mean, [mean])
+        var = tf.Print(var, [var])
+
+      if keep_average:
+        ema_mean_op = tf.assign_sub(emean, (emean - mean) * (1 - decay))
+        ema_var_op = tf.assign_sub(evar, (evar - var) * (1 - decay))
+        with tf.control_dependencies([ema_mean_op, ema_var_op]):
+          normed = tf.nn.batch_normalization(
+              x, mean, var, beta, gamma, eps, name=name)
+      else:
         normed = tf.nn.batch_normalization(
             x, mean, var, beta, gamma, eps, name=name)
+
     else:
-      # log.fatal(mean)
       if mean is None or var is None:
-        # mean, var = emean, evar
-        mean = emean
-        var = evar
+        if keep_average:
+          mean = emean
+          var = evar
+        else:
+          mean, var = tf.nn.moments(x, axes, name="moments")
+
       normed = tf.nn.batch_normalization(
           x, mean, var, beta, gamma, eps, name=name)
   return normed
@@ -112,20 +145,22 @@ def batch_norm(x,
 class LadderModel(object):
   """Ladder network object."""
 
-  def __init__(self, config, is_training=True):
-    """Initializes the model, assuming the architecture is feed-forward, 
+  def __init__(self, config, dtype=tf.float32, is_training=True, debug=False):
+    """Initializes the model, assuming the architecture is feed-forward,
     layer-wise.
 
     Args:
       config: LadderConfig object.
       is_training: Whether the model is in training mode.
+      debug: Add a constant 0.01 noise.
     """
-    self._dtype = tf.float32
+    self._dtype = dtype
     self._config = config
+    self._debug = debug
     self._is_training = is_training
 
     inputs = tf.placeholder(
-        tf.float32, shape=[None, config.layer_sizes[0]], name="inputs")
+        self.dtype, shape=[None, config.layer_sizes[0]], name="inputs")
     labels = tf.placeholder(tf.int64, shape=[None], name="labels")
     self._inputs = inputs
     self._labels = labels
@@ -134,21 +169,23 @@ class LadderModel(object):
     with tf.name_scope("clean"):
       with tf.variable_scope("encoder"):
         y_clean, act_clean, moments_clean = self.encoder(inputs, 0.0)
+        y_clean_norm = tf.nn.softmax(y_clean)
 
     if is_training:
       with tf.name_scope("corrupt"):
         with tf.variable_scope("encoder", reuse=True):
           y_corrupt, act_corrupt, _ = self.encoder(inputs,
                                                    self.config.noise_std)
+          y_corrupt_norm = tf.nn.softmax(y_corrupt)
 
       with tf.variable_scope("decoder"):
-        recon_cost = self.decoder(y_corrupt, act_corrupt, act_clean,
+        recon_cost = self.decoder(y_corrupt_norm, act_corrupt, act_clean,
                                   moments_clean)
 
     correct = tf.equal(tf.argmax(y_clean, 1), labels)
     acc = tf.reduce_mean(tf.cast(correct, "float")) * 100.0
     self._acc = acc
-    self._outputs = tf.nn.softmax(y_clean)
+    self._outputs = y_clean_norm
 
     if is_training:
       train_cost = tf.reduce_mean(
@@ -158,14 +195,16 @@ class LadderModel(object):
       pred_cost = tf.reduce_mean(
           tf.nn.sparse_softmax_cross_entropy_with_logits(
               self.slice_labeled(y_clean), labels))
-      lr = tf.Variable(0.0, trainable=False)
+
+      lr = tf.Variable(0.0, dtype=self.dtype, trainable=False)
       train_step = tf.train.AdamOptimizer(lr).minimize(train_cost)
-      new_lr = tf.placeholder(self.dtype, None)
+      new_lr = tf.placeholder(self.dtype, None, name="new_lr")
       assign_lr = tf.assign(lr, new_lr)
       self._lr = lr
       self._new_lr = new_lr
       self._assign_lr = assign_lr
       self._train_op = train_step
+      self._cost = train_cost
     pass
 
   @property
@@ -192,6 +231,10 @@ class LadderModel(object):
   def outputs(self):
     """Outputs."""
     return self._outputs
+
+  @property
+  def cost(self):
+    return self._cost
 
   @property
   def dtype(self):
@@ -243,7 +286,10 @@ class LadderModel(object):
     Returns:
       x_corrupt: Corrupted activation.
     """
-    return x + tf.random_normal(tf.shape(x)) * noise_std
+    if self._debug:
+      return x + tf.ones(tf.shape(x), dtype=self.dtype) * noise_std / 10
+    else:
+      return x + tf.random_normal(tf.shape(x), dtype=self.dtype) * noise_std
 
   def encoder(self, inputs, noise_std):
     """Builds encoder part.
@@ -259,7 +305,8 @@ class LadderModel(object):
     """
     # Add noise to input
     h = self.add_noise(inputs, noise_std)
-    h = tf.Print(h, [-1.0, tf.reduce_mean(h)])
+    # h = inputs
+    # h = tf.Print(h, [-1.0, tf.reduce_mean(h)])
 
     # Store intermediate activations.
     act = {}
@@ -281,7 +328,7 @@ class LadderModel(object):
         # Pre-activation
         z_pre = tf.matmul(h, w)
 
-        z_pre = tf.Print(z_pre, [-0.5, tf.reduce_mean(z_pre)])
+        # z_pre = tf.Print(z_pre, [-0.5, tf.reduce_mean(z_pre)])
 
         # Split labeled and unlabeled examples.
         z_pre_l, z_pre_u = self.split_lu(z_pre)
@@ -293,23 +340,34 @@ class LadderModel(object):
         # In the original implementation, there is no gamma in BN until
         # the very last layer. In any case, affine transformation is
         # performed after noise injection.
-        z_pre_l = tf.Print(z_pre_l, [4.0, tf.reduce_mean(z_pre_l)])
         z_l_bn = batch_norm(
-            z_pre_l, axes=[0], is_training=self.is_training, scope="bn_labeled")
-        z_l_bn = tf.Print(z_l_bn, [3.0, tf.reduce_mean(z_l_bn)])
+            z_pre_l,
+            axes=[0],
+            keep_average=noise_std == 0,
+            # keep_average=False,
+            is_training=self.is_training,
+            scope="bn_labeled",
+            # debug=noise_std == 0,
+            dtype=self.dtype)
+        # z_l_bn = z_pre_l
+
         z_u_bn = batch_norm(
             z_pre_u,
             axes=[0],
+            keep_average=False,
             is_training=self.is_training,
             scope="bn_unlabeled",
             mean=mean,
-            var=var)
+            var=var,
+            dtype=self.dtype)
+        # z_u_bn = z_pre_u
         z = tf.concat(0, [z_l_bn, z_u_bn])
-        z = tf.Print(z, [2.0, tf.reduce_mean(z)])
+        # z = tf.Print(z, [2.0, tf.reduce_mean(z)])
 
         # Add random Gaussian noise.
         z = self.add_noise(z, noise_std)
-        tf.Print(z, [1.0, tf.reduce_mean(z)])
+
+        # tf.Print(z, [1.0, tf.reduce_mean(z)])
 
         beta = bi("beta", [self.config.layer_sizes[ll]], 0.0, dtype=self.dtype)
         if ll == L:
@@ -319,10 +377,10 @@ class LadderModel(object):
                      dtype=self.dtype)
           # Just compute the logits here.
           h = gamma * (z + beta)
+          # h = z
         else:
           # Use ReLU activation in hidden layers.
           h = tf.nn.relu(z + beta)
-        h = tf.Print(h, [0.0, tf.reduce_mean(h)])
 
         # Save intermediate activation for reconstruction.
         act["labeled"][ll], act["unlabeled"][ll] = self.split_lu(z)
@@ -361,8 +419,14 @@ class LadderModel(object):
           ]
           v = wi("v", v_shape, dtype=self.dtype)
           u = tf.matmul(z_recon, v)
-        u = batch_norm(u, is_training=self.is_training, axes=[0], scope="bn_u")
-        z_recon = gauss_denoise(z_corrupt, u)
+        u = batch_norm(
+            u,
+            keep_average=False,
+            is_training=self.is_training,
+            axes=[0],
+            scope="bn_u",
+            dtype=self.dtype)
+        z_recon = gauss_denoise(z_corrupt, u, dtype=self.dtype)
         z_recon_bn = (z_recon - mean) / var
         _cost = tf.reduce_mean(tf.square(z_recon_bn - z_clean))
         _cost *= self.config.denoising_cost[ll]
@@ -378,43 +442,27 @@ class LadderModel(object):
     """
     sess.run(self._assign_lr, feed_dict={self._new_lr: new_lr})
 
-  def get_variable_map(self):
-    """Get a mapping from old names to variables."""
-    results = {}
+  def load_weights(self, sess, weights):
+    """Loading weights from original version."""
+    assign_ops = []
     L = len(self.config.layer_sizes) - 1
+    get_var = lambda x: tf.get_variable(x, dtype=self.dtype)
     with tf.variable_scope("encoder", reuse=True):
       for ll in range(1, L + 1):
         with tf.variable_scope("layer_{}".format(ll)):
-          w = tf.get_variable("w")
-          if ll > 1:
-            results["W_{}".format(ll - 1)] = w
-            results["beta_{}".format(ll - 1)] = tf.get_variable("beta")
-          else:
-            results["W"] = w
-            results["beta"] = tf.get_variable("beta")
+          assign_ops.append(
+              tf.assign(get_var("w"), weights["W_{}".format(ll - 1)]))
+          assign_ops.append(
+              tf.assign(get_var("beta"), weights["beta_{}".format(ll - 1)]))
           if ll == L:
-            results["gamma_{}".format(ll - 1)] = tf.get_variable("gamma")
+            assign_ops.append(
+                tf.assign(get_var("gamma"), weights["gamma_{}".format(ll - 1)]))
           with tf.variable_scope("bn_labeled"):
-            # if ll > 1:
-            #   results["cond_{}/running_mean_{}/ExponentialMovingAverage".format(
-            #       ll + 5, ll - 1)] = tf.get_variable("ema_mean")
-            #   results["cond_{}/running_var_{}/ExponentialMovingAverage".format(
-            #       ll + 5, ll - 1)] = tf.get_variable("ema_var")
-            # else:
-            #   results[
-            #       "cond_6/running_mean/ExponentialMovingAverage"] = tf.get_variable(
-            #           "ema_mean")
-            #   results[
-            #       "cond_6/running_var/ExponentialMovingAverage"] = tf.get_variable(
-            #           "ema_var")
-            if ll > 1:
-              results["running_mean_{}".format(ll - 1)] = tf.get_variable(
-                  "ema_mean")
-              results["running_var_{}".format(ll - 1)] = tf.get_variable(
-                  "ema_var")
-            else:
-              results["running_mean"] = tf.get_variable("ema_mean")
-              results["running_var"] = tf.get_variable("ema_var")
+            assign_ops.append(
+                tf.assign(
+                    get_var("ema_mean"), weights["mean_{}".format(ll - 1)]))
+            assign_ops.append(
+                tf.assign(get_var("ema_var"), weights["var_{}".format(ll - 1)]))
 
     if self.is_training:
       with tf.variable_scope("decoder", reuse=True):
@@ -422,18 +470,41 @@ class LadderModel(object):
           with tf.variable_scope("layer_{}".format(ll)):
             # There is no V's in the last layer.
             if ll < L:
-              if ll > 0:
-                results["V_{}".format(ll)] = tf.get_variable("v")
-              else:
-                results["V"] = tf.get_variable("v")
-              v = tf.get_variable("v")
+              assign_ops.append(
+                  tf.assign(get_var("v"), weights["V_{}".format(ll)]))
             for ii in range(1, 10):
-              ax = tf.get_variable("a{}".format(ii))
-              if ll == L:
-                results["a{}".format(ii)] = ax
-              else:
-                results["a{}_{}".format(ii, L - ll)] = ax
-    return results
+              assign_ops.append(
+                  tf.assign(
+                      get_var("a{}".format(ii)), weights["a{}_{}".format(ii,
+                                                                         ll)]))
+    sess.run(tf.group(*assign_ops))
+
+  def get_weights(self):
+    """Grabs all weights."""
+    weights = {}
+    L = len(self.config.layer_sizes) - 1
+    get_var = lambda x: tf.get_variable(x, dtype=self.dtype)
+    with tf.variable_scope("encoder", reuse=True):
+      for ll in range(1, L + 1):
+        with tf.variable_scope("layer_{}".format(ll)):
+          weights["W_{}".format(ll - 1)] = get_var("w")
+          weights["beta_{}".format(ll - 1)] = get_var("beta")
+          if ll == L:
+            weights["gamma_{}".format(ll - 1)] = get_var("gamma")
+          with tf.variable_scope("bn_labeled"):
+            weights["mean_{}".format(ll - 1)] = get_var("ema_mean")
+            weights["var_{}".format(ll - 1)] = get_var("ema_var")
+
+    if self.is_training:
+      with tf.variable_scope("decoder", reuse=True):
+        for ll in range(L, -1, -1):
+          with tf.variable_scope("layer_{}".format(ll)):
+            # There is no V's in the last layer.
+            if ll < L:
+              weights["V_{}".format(ll)] = get_var("v")
+            for ii in range(1, 11):
+              weights["a{}_{}".format(ii, ll)] = get_var("a{}".format(ii))
+    return weights
 
 
 LadderConfig = namedtuple("LadderConfig",

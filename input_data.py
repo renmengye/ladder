@@ -108,6 +108,11 @@ class DataSet(object):
   def epochs_completed(self):
     return self._epochs_completed
 
+  def reset(self):
+    """Reset the iterator."""
+    self._index_in_epoch = 0
+    self._epochs_completed = 0
+
   def next_batch(self, batch_size, fake_data=False):
     """Return the next `batch_size` examples from this data set."""
     if fake_data:
@@ -123,6 +128,7 @@ class DataSet(object):
       self._epochs_completed += 1
       # Shuffle the data
       perm = numpy.arange(self._num_examples)
+      numpy.random.seed(1000)
       numpy.random.shuffle(perm)
       self._images = self._images[perm]
       self._labels = self._labels[perm]
@@ -142,9 +148,10 @@ class SemiDataSet(object):
     # Unlabled DataSet
     self.unlabeled_ds = DataSet(images, labels)
 
-    # Labeled DataSet
+    # Labeled DataSet]
     self.num_examples = self.unlabeled_ds.num_examples
     indices = numpy.arange(self.num_examples)
+    numpy.random.seed(0)
     shuffled_indices = numpy.random.permutation(indices)
     images = images[shuffled_indices]
     labels = labels[shuffled_indices]
@@ -162,6 +169,11 @@ class SemiDataSet(object):
     l_images = images[i_labeled]
     l_labels = labels[i_labeled]
     self.labeled_ds = DataSet(l_images, l_labels)
+
+  def reset(self):
+    """Reset the iterator."""
+    self.labeled_ds.reset()
+    self.unlabeled_ds.reset()
 
   def next_batch(self, batch_size):
     unlabeled_images, _ = self.unlabeled_ds.next_batch(batch_size)
